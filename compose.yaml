@@ -37,6 +37,13 @@ services:
       NEXT_PUBLIC_API_BASE_URL: /api
     depends_on: [api]
     ports: ["3000:3000"]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "argus_private"
+      traefik.http.routers.argus.rule: "Host(`srv1831469.hstgr.cloud`)"
+      traefik.http.routers.argus.entrypoints: "web"
+      traefik.http.routers.argus.service: "argus"
+      traefik.http.services.argus.loadbalancer.server.port: "3000"
     networks: [private]
 volumes:
   nexusintel_pg:
