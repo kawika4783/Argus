@@ -32,9 +32,10 @@ services:
       context: .
       dockerfile: infrastructure/docker/web.Dockerfile
       args:
-        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+        NEXT_PUBLIC_API_BASE_URL: /api
+        API_INTERNAL_URL: http://api:8000
     environment:
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_PUBLIC_API_BASE_URL: /api
     depends_on: [api]
     ports: ["3000:3000"]
     networks: [private]

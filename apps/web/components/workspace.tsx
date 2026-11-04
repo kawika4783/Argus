@@ -7,7 +7,7 @@ import { Activity, AlertTriangle, Bell, BriefcaseBusiness, Check, ChevronDown, C
 type View = 'Dashboard' | 'Cases' | 'Entities' | 'Graph' | 'Timeline' | 'Map' | 'Evidence' | 'Search' | 'Admin';
 type Entity = { id: string; name: string; type: string; confidence: number };
 type Data = { stats: { active_cases: number; entities: number; relationships: number; evidence_ingestion: number; alerts: number }; cases: { id: string; title: string; status: string; priority: string; description: string }[]; entities: Entity[]; relationships: { id: string; source: string; target: string; type: string; confidence: number }[]; activity: string[]; alerts: string[]; tasks: string[] };
-const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const API = process.env.NEXT_PUBLIC_API_BASE_URL || '/api';
 const nav: { label: View; icon: typeof Activity }[] = [{ label: 'Dashboard', icon: LayoutDashboard }, { label: 'Cases', icon: BriefcaseBusiness }, { label: 'Entities', icon: Users }, { label: 'Graph', icon: Network }, { label: 'Timeline', icon: Activity }, { label: 'Map', icon: Map }, { label: 'Evidence', icon: Database }, { label: 'Search', icon: Search }, { label: 'Admin', icon: Settings }];
 
 export default function Workspace() {
