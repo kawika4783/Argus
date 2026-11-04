@@ -40,9 +40,14 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: "argus_private"
-      traefik.http.routers.argus.rule: "Host(`srv1831469.hstgr.cloud`)"
+      traefik.http.routers.argus.rule: "Host(`argus.2.25.84.23.nip.io`)"
       traefik.http.routers.argus.entrypoints: "web"
       traefik.http.routers.argus.service: "argus"
+      traefik.http.routers.argus-secure.rule: "Host(`argus.2.25.84.23.nip.io`)"
+      traefik.http.routers.argus-secure.entrypoints: "websecure"
+      traefik.http.routers.argus-secure.tls: "true"
+      traefik.http.routers.argus-secure.tls.certresolver: "letsencrypt"
+      traefik.http.routers.argus-secure.service: "argus"
       traefik.http.services.argus.loadbalancer.server.port: "3000"
     networks: [private]
 volumes:
