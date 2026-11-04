@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: nexusintel
+      POSTGRES_USER: nexusintel
+      POSTGRES_PASSWORD: nexusintel
+    volumes:
+      - nexusintel_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexusintel -d nexusintel"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [private]
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    environment:
+      NEXUSINTEL_DATABASE_URL: postgresql+psycopg://nexusintel:nexusintel@db:5432/nexusintel
+      NEXUSINTEL_SESSION_SECRET: ${NEXUSINTEL_SESSION_SECRET:-local-only-change-me}
+      NEXUSINTEL_DEMO_PASSWORD: ${NEXUSINTEL_DEMO_PASSWORD:-change-me-locally}
+      NEXUSINTEL_CORS_ORIGINS: http://localhost:3000
+    depends_on:
+      db:
+        condition: service_healthy
+    ports: ["8000:8000"]
+    networks: [private]
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    depends_on: [api]
+    ports: ["3000:3000"]
+    networks: [private]
+volumes:
+  nexusintel_pg:
+networks:
+  private:
+    driver: bridge
