@@ -8,6 +8,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY apps/web ./
 ARG NEXT_PUBLIC_API_BASE_URL
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+ARG API_INTERNAL_URL=http://api:8000
+ENV API_INTERNAL_URL=$API_INTERNAL_URL
 RUN npm run build
 FROM node:20.17-alpine
 WORKDIR /app
