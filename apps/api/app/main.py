@@ -430,12 +430,18 @@ def _provider_root(base_url: str) -> str:
     root = base_url.rstrip("/")
     return root[:-3] if root.endswith("/v1") else root
 
-def _chat_completion(base_url: str, model: str, api_key: str, messages: list[dict[str, str]], timeout: int) -> tuple[str, int, int]:
+def _chat_completion(base_url: str, model: str, api_key: str, messages: list[dict[str, str]], timeout: int, prefer_ollama_native: bool = False) -> tuple[str, int, int]:
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     root = _provider_root(base_url)
     with httpx.Client(timeout=timeout) as client:
+        if prefer_ollama_native:
+            response = client.post(root + "/api/chat", headers=headers, json={"model": model, "messages": messages, "stream": False, "think": False})
+            if response.status_code not in {404, 405}:
+                response.raise_for_status()
+                message = response.json().get("message", {})
+                return str(message.get("content", "")), 0, 0
         response = client.post(root + "/v1/chat/completions", headers=headers, json={"model": model, "messages": messages, "stream": False})
         if response.status_code not in {404, 405}:
             response.raise_for_status()
@@ -449,12 +455,29 @@ def _chat_completion(base_url: str, model: str, api_key: str, messages: list[dic
         message = body.get("message", {})
         return str(message.get("content", "")), 0, 0
 
-def _ollama_stream(base_url: str, model: str, api_key: str, messages: list[dict[str, str]], timeout: int) -> Iterator[str]:
+def _ollama_stream(base_url: str, model: str, api_key: str, messages: list[dict[str, str]], timeout: int, prefer_ollama_native: bool = False) -> Iterator[str]:
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     root = _provider_root(base_url)
     with httpx.Client(timeout=timeout) as client:
+        if prefer_ollama_native:
+            with client.stream("POST", root + "/api/chat", headers=headers, json={"model": model, "messages": messages, "stream": True, "think": False}) as response:
+                if response.status_code not in {404, 405}:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            body = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        text = body.get("message", {}).get("content", "")
+                        if text:
+                            yield text
+                        if body.get("done"):
+                            return
+                    return
         with client.stream("POST", root + "/v1/chat/completions", headers=headers, json={"model": model, "messages": messages, "stream": True}) as response:
             if response.status_code in {404, 405}:
                 response.close()
@@ -514,7 +537,7 @@ def _run_ai_question(payload: AiQuestionRequest, user: User, db: DbSession) -> d
             base_url, api_key = settings.openai_base_url, settings.openai_api_key
         else:
             base_url, api_key = settings.ollama_base_url, settings.ollama_api_key
-        text, input_tokens, output_tokens = _chat_completion(base_url, model, api_key, [{"role": "system", "content": "Answer only from the supplied authorized case context. If evidence is missing, say so. Label uncertainty."}, {"role": "user", "content": payload.question + "\n\nAUTHORIZED CASE CONTEXT:\n" + _case_context(case, db, record.context_limit)}], settings.ollama_request_timeout_seconds)
+        text, input_tokens, output_tokens = _chat_completion(base_url, model, api_key, [{"role": "system", "content": "Answer only from the supplied authorized case context. If evidence is missing, say so. Label uncertainty."}, {"role": "user", "content": payload.question + "\n\nAUTHORIZED CASE CONTEXT:\n" + _case_context(case, db, record.context_limit)}], settings.ollama_request_timeout_seconds, provider == "ollama")
         _record_ai_usage(db, user, provider, model, "question", "success", input_tokens, output_tokens)
         return {"engine": provider, "ai_generated": True, "provider_used": provider, "model": model, "question": payload.question, "answer": text, "evidence": [case.id] if case else []}
     except Exception as exc:
@@ -566,7 +589,7 @@ def ai_question_stream(payload: AiQuestionRequest, user: User = Depends(current_
     def generate() -> Iterator[str]:
         chunks: list[str] = []
         try:
-            for text in _ollama_stream(base_url, model, api_key, messages, settings.ollama_request_timeout_seconds):
+            for text in _ollama_stream(base_url, model, api_key, messages, settings.ollama_request_timeout_seconds, provider == "ollama"):
                 chunks.append(text)
                 yield f"data: {json.dumps({'type': 'answer_delta', 'text': text})}\n\n"
             answer = "".join(chunks)
