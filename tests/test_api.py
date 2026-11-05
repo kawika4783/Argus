@@ -1,4 +1,5 @@
 import os
+import httpx
 os.environ["NEXUSINTEL_DATABASE_URL"] = "sqlite:///./test-nexusintel.db"
 os.environ["NEXUSINTEL_DEMO_PASSWORD"] = "demo-pass"
 
@@ -43,7 +44,14 @@ def test_news_sync_is_deduplicated_and_case_attachable(monkeypatch):
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr("apps.api.app.main.httpx.Client.get", lambda self, url, **kwargs: FakeResponse())
+    original_get = httpx.Client.get
+
+    def fake_get(self, url, **kwargs):
+        if "gdelt" in str(url):
+            return FakeResponse()
+        return original_get(self, url, **kwargs)
+
+    monkeypatch.setattr("apps.api.app.main.httpx.Client.get", fake_get)
     first_sync = client.post("/news/sources/SRC-GDELT/sync")
     assert first_sync.status_code == 200
     assert first_sync.json()["items_seen"] == 2
