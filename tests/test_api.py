@@ -53,11 +53,11 @@ def test_zero_cost_ai_status_and_deterministic_question():
     status_body = status_response.json()
     assert status_body["zero_cost_mode"] is True
     assert status_body["openai"]["available"] is False
-    question = client.post("/ai/question", json={"question": "Summarize this case", "case_id": "CS-4729", "analysis_type": "case_summary"})
+    question = client.post("/ai/question", json={"question": "Summarize this case", "case_id": "CS-4729", "analysis_type": "question"})
     assert question.status_code == 200
     assert question.json()["engine"] == "deterministic"
     assert question.json()["ai_generated"] is False
-    stream = client.post("/ai/question/stream", json={"question": "Stream this case summary", "case_id": "CS-4729", "analysis_type": "case_summary"})
+    stream = client.post("/ai/question/stream", json={"question": "Stream this case summary", "case_id": "CS-4729", "analysis_type": "question"})
     assert stream.status_code == 200
     assert "[DONE]" in stream.text
     monte_carlo = client.post("/ai/question", json={"question": "Estimate the scenario", "analysis_type": "monte_carlo", "probability": 0.4, "trials": 500})

@@ -90,7 +90,7 @@ class AiQuestionRequest(BaseModel):
     probability: float = Field(default=0.5, ge=0, le=1)
 
 class AnalysisRequest(BaseModel):
-    analysis_type: str = Field(pattern="^(case_summary|trend|anomaly|monte_carlo|regression)$")
+    analysis_type: str = Field(pattern="^(case_summary|trend|anomaly|monte_carlo|regression|question)$")
     values: list[float] = Field(default_factory=list, max_length=5000)
     trials: int = Field(default=1000, ge=100, le=100000)
     probability: float = Field(default=0.5, ge=0, le=1)
