@@ -245,7 +245,7 @@ function AdminViewContent({ cases, role }: { cases: Case[]; role: string }) {
   async function ask(event: FormEvent) {
     event.preventDefault();
     setNotice('');
-    const response = await fetchWithTimeout(`${API}/ai/question`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ question, case_id: caseId || null, analysis_type: 'question' }) });
+    const response = await fetchWithTimeout(`${API}/ai/question`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ question, case_id: caseId || null, analysis_type: 'question' }) }, 90000);
     if (!response.ok) { setNotice('The authorized analysis request failed.'); return; }
     const result = await response.json();
     setAnswer(`${result.answer} Provider: ${result.engine || result.provider_used}. ${result.fallback_reason || ''}`);
