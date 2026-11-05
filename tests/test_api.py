@@ -43,7 +43,7 @@ def test_news_sync_is_deduplicated_and_case_attachable(monkeypatch):
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr("apps.api.app.main.httpx.Client.get", lambda self, url: FakeResponse())
+    monkeypatch.setattr("apps.api.app.main.httpx.Client.get", lambda self, url, **kwargs: FakeResponse())
     first_sync = client.post("/news/sources/SRC-GDELT/sync")
     assert first_sync.status_code == 200
     assert first_sync.json()["items_seen"] == 2
