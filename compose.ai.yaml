@@ -1,0 +1,24 @@
+services:
+  ollama:
+    image: ollama/ollama:0.12.6
+    volumes:
+      - argus_ollama:/root/.ollama
+    networks: [private]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  api:
+    environment:
+      NEXUSINTEL_OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+volumes:
+  argus_ollama:
+networks:
+  private:
+    external: false

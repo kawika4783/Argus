@@ -1,10 +1,18 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 from .config import settings
-from .models import Case, Entity, NewsSource, Relationship, User
+from .models import AiProviderSetting, Case, Entity, NewsSource, Relationship, User
 from .security import hash_password
 
 def ensure_demo_data(db: DbSession) -> None:
+    ai_settings = db.get(AiProviderSetting, "DEFAULT")
+    if not ai_settings:
+        db.add(AiProviderSetting(id="DEFAULT", zero_cost_mode=settings.zero_cost_mode, active_provider="ollama" if settings.ollama_default_model and settings.ollama_base_url != "http://ollama:11434" else "deterministic", ollama_model=settings.ollama_default_model, context_limit=settings.ollama_context_limit, openai_enabled=False, openai_model=settings.openai_default_model, openai_spending_limit_usd=settings.openai_spending_limit_usd))
+    else:
+        if not ai_settings.ollama_model and settings.ollama_default_model:
+            ai_settings.ollama_model = settings.ollama_default_model
+        if ai_settings.active_provider == "deterministic" and settings.ollama_default_model and settings.ollama_base_url != "http://ollama:11434":
+            ai_settings.active_provider = "ollama"
     user = db.scalar(select(User).where(User.username == "analyst"))
     if not user:
         user = User(username="analyst", email="analyst@nexusintel.local", password_hash=hash_password(settings.demo_password), role="analyst")

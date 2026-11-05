@@ -1,21 +1,26 @@
 import asyncio
 import hashlib
 import ipaddress
+import json
+import math
+import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from typing import Iterator
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, or_, select
+from sqlalchemy import create_engine, func, or_, select
 from sqlalchemy.orm import Session as DbSession, sessionmaker
 from .config import settings
 from .demo import ensure_demo_data
-from .models import Base, Case, Entity, NewsIngestionRun, NewsItem, NewsSource, Relationship, Session, User
+from .models import AiProviderSetting, AiUsageEvent, Base, Case, Entity, NewsIngestionRun, NewsItem, NewsSource, Relationship, Session, User
 from .security import expires_in, hash_password, new_session_id, secrets_match, verify_password
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
@@ -26,7 +31,7 @@ with SessionLocal() as db:
     ensure_demo_data(db)
 
 app = FastAPI(title="Argus API", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
+app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type"])
 
 @app.on_event("startup")
 async def start_news_scheduler() -> None:
@@ -66,6 +71,29 @@ class RelationshipCreate(BaseModel):
     relationship_type: str = Field(min_length=2, max_length=64)
     confidence: int = Field(default=50, ge=0, le=100)
     case_id: str = Field(min_length=1, max_length=32)
+
+class AiSettingsUpdate(BaseModel):
+    zero_cost_mode: bool | None = None
+    active_provider: str | None = Field(default=None, pattern="^(deterministic|ollama|openai)$")
+    ollama_model: str | None = Field(default=None, max_length=128)
+    context_limit: int | None = Field(default=None, ge=512, le=32768)
+    openai_enabled: bool | None = None
+    openai_model: str | None = Field(default=None, max_length=128)
+    openai_spending_limit_usd: float | None = Field(default=None, ge=0, le=100000)
+
+class AiQuestionRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=10000)
+    case_id: str | None = Field(default=None, max_length=32)
+    analysis_type: str = Field(default="case_summary", pattern="^(case_summary|trend|anomaly|monte_carlo|regression|question)$")
+    values: list[float] = Field(default_factory=list, max_length=5000)
+    trials: int = Field(default=1000, ge=100, le=100000)
+    probability: float = Field(default=0.5, ge=0, le=1)
+
+class AnalysisRequest(BaseModel):
+    analysis_type: str = Field(pattern="^(case_summary|trend|anomaly|monte_carlo|regression)$")
+    values: list[float] = Field(default_factory=list, max_length=5000)
+    trials: int = Field(default=1000, ge=100, le=100000)
+    probability: float = Field(default=0.5, ge=0, le=1)
 
 class NewsSourceCreate(BaseModel):
     name: str = Field(min_length=3, max_length=255)
@@ -258,9 +286,324 @@ async def _news_scheduler() -> None:
         await asyncio.sleep(settings.news_poll_interval_seconds)
         await asyncio.to_thread(run_scheduled_news_sync)
 
+def _get_ai_settings(db: DbSession) -> AiProviderSetting:
+    record = db.get(AiProviderSetting, "DEFAULT")
+    if record:
+        return record
+    record = AiProviderSetting(id="DEFAULT", zero_cost_mode=settings.zero_cost_mode, active_provider="deterministic", ollama_model=settings.ollama_default_model, context_limit=settings.ollama_context_limit, openai_enabled=False, openai_model=settings.openai_default_model, openai_spending_limit_usd=settings.openai_spending_limit_usd)
+    db.add(record)
+    db.commit()
+    return record
+
+def _ollama_models() -> dict[str, object]:
+    endpoint = settings.ollama_base_url.rstrip("/") + "/api/tags"
+    try:
+        headers = {"Authorization": f"Bearer {settings.ollama_api_key}"} if settings.ollama_api_key else {}
+        with httpx.Client(timeout=2.0, headers=headers) as client:
+            response = client.get(endpoint)
+            response.raise_for_status()
+        models = [item.get("name", "") for item in response.json().get("models", []) if item.get("name")]
+        return {"available": True, "models": models, "error": None}
+    except Exception as exc:
+        return {"available": False, "models": [], "error": f"Ollama unavailable: {type(exc).__name__}"}
+
+def _usage_summary(db: DbSession) -> dict[str, object]:
+    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    external = db.scalar(select(func.count(AiUsageEvent.id)).where(AiUsageEvent.created_at >= month_start, AiUsageEvent.provider.in_(["openai", "chatgpt"]))) or 0
+    estimated = db.scalar(select(func.coalesce(func.sum(AiUsageEvent.estimated_cost_usd), 0.0)).where(AiUsageEvent.created_at >= month_start)) or 0.0
+    local = db.scalar(select(func.count(AiUsageEvent.id)).where(AiUsageEvent.created_at >= month_start, AiUsageEvent.provider.in_(["deterministic", "ollama"]))) or 0
+    errors = db.scalar(select(func.count(AiUsageEvent.id)).where(AiUsageEvent.created_at >= month_start, AiUsageEvent.status == "error")) or 0
+    return {"month": month_start.strftime("%Y-%m"), "local_requests": local, "external_requests": external, "estimated_cost_usd": round(float(estimated), 6), "provider_errors": errors}
+
+def _ai_status_payload(db: DbSession) -> dict[str, object]:
+    record = _get_ai_settings(db)
+    ollama = _ollama_models()
+    openai_configured = bool(settings.openai_enabled and settings.openai_api_key and record.openai_enabled and not record.zero_cost_mode)
+    if record.zero_cost_mode:
+        active_provider = "ollama" if record.active_provider == "ollama" and ollama["available"] else "deterministic"
+    elif record.active_provider == "openai" and openai_configured:
+        active_provider = "openai"
+    elif record.active_provider == "ollama" and ollama["available"]:
+        active_provider = "ollama"
+    else:
+        active_provider = "deterministic"
+    return {
+        "zero_cost_mode": record.zero_cost_mode,
+        "active_provider": active_provider,
+        "configured_provider": record.active_provider,
+        "model": record.ollama_model if active_provider == "ollama" else record.openai_model if active_provider == "openai" else "deterministic-engine",
+        "context_limit": record.context_limit,
+        "ollama": {"available": ollama["available"], "models": ollama["models"], "error": ollama["error"], "endpoint": settings.ollama_base_url},
+        "openai": {"enabled_by_admin": record.openai_enabled, "enabled_by_environment": settings.openai_enabled, "api_key_configured": bool(settings.openai_api_key), "available": openai_configured, "spending_limit_usd": record.openai_spending_limit_usd},
+        "chatgpt_subscription": {"status": "unavailable_remote_hosted_approval_required", "message": "Official ChatGPT plan usage requires an approved integration; it is not enabled for this remotely hosted Argus instance."},
+        "usage": _usage_summary(db),
+    }
+
+def _authorized_case(case_id: str | None, user: User, db: DbSession) -> Case | None:
+    if not case_id:
+        return None
+    is_admin = user.role in {"administrator", "super_administrator"}
+    case = db.get(Case, case_id)
+    if not case or (not is_admin and case.owner_user_id != user.id):
+        raise HTTPException(status_code=404, detail="Authorized case not found")
+    return case
+
+def _deterministic_analysis(case: Case | None, payload: AnalysisRequest | AiQuestionRequest, db: DbSession) -> dict[str, object]:
+    if payload.analysis_type == "monte_carlo":
+        rng = random.Random(42)
+        successes = sum(1 for _ in range(payload.trials) if rng.random() < payload.probability)
+        estimate = successes / payload.trials
+        margin = 1.96 * math.sqrt(max(estimate * (1 - estimate), 1e-9) / payload.trials)
+        return {"engine": "deterministic", "ai_generated": False, "analysis_type": payload.analysis_type, "answer": f"Monte Carlo estimate: {estimate:.3f} success probability over {payload.trials:,} trials.", "metrics": {"trials": payload.trials, "successes": successes, "estimate": round(estimate, 6), "confidence_interval_95": [round(max(0, estimate - margin), 6), round(min(1, estimate + margin), 6)]}, "evidence": []}
+    if payload.analysis_type == "regression":
+        if len(payload.values) < 2:
+            raise HTTPException(status_code=422, detail="Regression requires at least two numeric observations")
+        xs = list(range(len(payload.values)))
+        x_mean = sum(xs) / len(xs)
+        y_mean = sum(payload.values) / len(payload.values)
+        denominator = sum((x - x_mean) ** 2 for x in xs)
+        slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, payload.values)) / denominator
+        intercept = y_mean - slope * x_mean
+        ss_total = sum((y - y_mean) ** 2 for y in payload.values)
+        ss_residual = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, payload.values))
+        r_squared = 1 - ss_residual / ss_total if ss_total else 1.0
+        return {"engine": "deterministic", "ai_generated": False, "analysis_type": payload.analysis_type, "answer": f"Linear trend slope: {slope:.4f}; R²: {r_squared:.3f}.", "metrics": {"slope": round(slope, 6), "intercept": round(intercept, 6), "r_squared": round(r_squared, 6), "observations": len(payload.values)}, "evidence": []}
+    if not case:
+        return {"engine": "deterministic", "ai_generated": False, "analysis_type": payload.analysis_type, "answer": "No case was selected. Choose a case or provide a numeric analysis input.", "metrics": {}, "evidence": []}
+    entities = db.scalars(select(Entity).where(Entity.case_id == case.id)).all()
+    relationships = db.scalars(select(Relationship).where(Relationship.case_id == case.id)).all()
+    news = db.scalars(select(NewsItem).where(NewsItem.case_id == case.id)).all()
+    degree: dict[str, int] = {entity.id: 0 for entity in entities}
+    for relationship in relationships:
+        degree[relationship.source_id] = degree.get(relationship.source_id, 0) + 1
+        degree[relationship.target_id] = degree.get(relationship.target_id, 0) + 1
+    if payload.analysis_type == "trend":
+        daily: dict[str, int] = {}
+        for item in news:
+            date_key = (item.published_at or item.discovered_at).date().isoformat()
+            daily[date_key] = daily.get(date_key, 0) + 1
+        return {"engine": "deterministic", "ai_generated": False, "analysis_type": payload.analysis_type, "answer": f"The case has {len(news)} attached news records across {len(daily)} observed dates.", "metrics": {"daily_news": daily, "news_items": len(news)}, "evidence": [item.id for item in news]}
+    if payload.analysis_type == "anomaly":
+        low_confidence = [entity.id for entity in entities if entity.confidence < 50]
+        isolated = [entity.id for entity in entities if degree.get(entity.id, 0) == 0]
+        return {"engine": "deterministic", "ai_generated": False, "analysis_type": payload.analysis_type, "answer": f"Found {len(low_confidence)} low-confidence entities and {len(isolated)} isolated entities for analyst review.", "metrics": {"low_confidence_entities": low_confidence, "isolated_entities": isolated}, "evidence": low_confidence + isolated}
+    top = sorted(((entity_id, count) for entity_id, count in degree.items()), key=lambda item: item[1], reverse=True)[:5]
+    answer = f"Case {case.id} contains {len(entities)} entities, {len(relationships)} relationships, and {len(news)} attached news records."
+    if payload.analysis_type == "question":
+        answer += " This is a deterministic case summary; no paid or external model was used."
+    return {"engine": "deterministic", "ai_generated": False, "analysis_type": payload.analysis_type, "answer": answer, "metrics": {"entities": len(entities), "relationships": len(relationships), "news_items": len(news), "highest_degree_entities": top}, "evidence": [case.id] + [entity.id for entity in entities]}
+
+def _case_context(case: Case | None, db: DbSession, context_limit: int) -> str:
+    if not case:
+        return "No case was selected."
+    entities = db.scalars(select(Entity).where(Entity.case_id == case.id).limit(50)).all()
+    relationships = db.scalars(select(Relationship).where(Relationship.case_id == case.id).limit(50)).all()
+    news = db.scalars(select(NewsItem).where(NewsItem.case_id == case.id).limit(20)).all()
+    context = f"Case {case.id}: {case.title}\nDescription: {case.description}\nEntities: " + ", ".join(f"{item.name} ({item.entity_type})" for item in entities) + "\nRelationships: " + ", ".join(f"{item.source_id} {item.relationship_type} {item.target_id}" for item in relationships) + "\nAttached news: " + ", ".join(item.title for item in news)
+    return context[: max(1000, context_limit * 4)]
+
+def _provider_root(base_url: str) -> str:
+    root = base_url.rstrip("/")
+    return root[:-3] if root.endswith("/v1") else root
+
+def _chat_completion(base_url: str, model: str, api_key: str, messages: list[dict[str, str]], timeout: int) -> tuple[str, int, int]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    root = _provider_root(base_url)
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(root + "/v1/chat/completions", headers=headers, json={"model": model, "messages": messages, "stream": False})
+        if response.status_code not in {404, 405}:
+            response.raise_for_status()
+            body = response.json()
+            text = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+            usage = body.get("usage", {})
+            return text, int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0))
+        response = client.post(root + "/api/chat", headers=headers, json={"model": model, "messages": messages, "stream": False})
+        response.raise_for_status()
+        body = response.json()
+        message = body.get("message", {})
+        return str(message.get("content", "")), 0, 0
+
+def _ollama_stream(base_url: str, model: str, api_key: str, messages: list[dict[str, str]], timeout: int) -> Iterator[str]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    root = _provider_root(base_url)
+    with httpx.Client(timeout=timeout) as client:
+        with client.stream("POST", root + "/v1/chat/completions", headers=headers, json={"model": model, "messages": messages, "stream": True}) as response:
+            if response.status_code in {404, 405}:
+                response.close()
+            else:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    raw = line[5:].strip() if line.startswith("data:") else line
+                    if raw == "[DONE]":
+                        return
+                    try:
+                        body = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    text = body.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    if text:
+                        yield text
+                return
+        with client.stream("POST", root + "/api/chat", headers=headers, json={"model": model, "messages": messages, "stream": True}) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                try:
+                    body = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                text = body.get("message", {}).get("content", "")
+                if text:
+                    yield text
+                if body.get("done"):
+                    return
+
+def _record_ai_usage(db: DbSession, user: User, provider: str, model: str, operation: str, status_value: str, input_tokens: int = 0, output_tokens: int = 0, error_message: str = "") -> None:
+    estimated = ((input_tokens + output_tokens) / 1000) * settings.openai_cost_per_1k_tokens_usd if provider == "openai" else 0.0
+    db.add(AiUsageEvent(id=f"AI-{new_session_id()[:48]}", user_id=user.id, provider=provider, model=model, operation=operation, status=status_value, input_tokens=input_tokens, output_tokens=output_tokens, estimated_cost_usd=estimated, error_message=error_message[:1000]))
+    db.commit()
+
+def _run_ai_question(payload: AiQuestionRequest, user: User, db: DbSession) -> dict[str, object]:
+    case = _authorized_case(payload.case_id, user, db)
+    deterministic_payload = AnalysisRequest(analysis_type=payload.analysis_type if payload.analysis_type != "question" else "question", values=payload.values, trials=payload.trials, probability=payload.probability)
+    record = _get_ai_settings(db)
+    status_payload = _ai_status_payload(db)
+    if payload.analysis_type != "question" or status_payload["active_provider"] == "deterministic":
+        result = _deterministic_analysis(case, deterministic_payload, db)
+        result["question"] = payload.question
+        _record_ai_usage(db, user, "deterministic", "deterministic-engine", "question", "success")
+        return result
+    provider = str(status_payload["active_provider"])
+    model = str(status_payload["model"])
+    try:
+        if provider == "openai":
+            current_cost = float(_usage_summary(db)["estimated_cost_usd"])
+            if record.openai_spending_limit_usd <= 0 or current_cost >= record.openai_spending_limit_usd:
+                raise RuntimeError("OpenAI usage is blocked by the configured spending limit")
+            base_url, api_key = settings.openai_base_url, settings.openai_api_key
+        else:
+            base_url, api_key = settings.ollama_base_url, settings.ollama_api_key
+        text, input_tokens, output_tokens = _chat_completion(base_url, model, api_key, [{"role": "system", "content": "Answer only from the supplied authorized case context. If evidence is missing, say so. Label uncertainty."}, {"role": "user", "content": payload.question + "\n\nAUTHORIZED CASE CONTEXT:\n" + _case_context(case, db, record.context_limit)}], settings.ollama_request_timeout_seconds)
+        _record_ai_usage(db, user, provider, model, "question", "success", input_tokens, output_tokens)
+        return {"engine": provider, "ai_generated": True, "provider_used": provider, "model": model, "question": payload.question, "answer": text, "evidence": [case.id] if case else []}
+    except Exception as exc:
+        _record_ai_usage(db, user, provider, model, "question", "error", error_message=type(exc).__name__)
+        fallback = _deterministic_analysis(case, deterministic_payload, db)
+        fallback["provider_requested"] = provider
+        fallback["fallback_reason"] = "Configured provider unavailable; deterministic analysis was used instead."
+        fallback["question"] = payload.question
+        return fallback
+
+def _stream_chunks(value: dict[str, object]) -> Iterator[str]:
+    text_value = str(value.get("answer", ""))
+    words = text_value.split(" ") or [text_value]
+    for index in range(0, len(words), 24):
+        chunk = " ".join(words[index:index + 24])
+        yield f"data: {json.dumps({'type': 'answer_delta', 'text': chunk + (' ' if index + 24 < len(words) else '')})}\n\n"
+    yield f"data: {json.dumps({'type': 'complete', 'result': value})}\n\n"
+    yield "data: [DONE]\n\n"
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "argus-api"}
+
+@app.get("/ai/status")
+def ai_status(user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    return _ai_status_payload(db)
+
+@app.post("/ai/question")
+def ai_question(payload: AiQuestionRequest, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    return _run_ai_question(payload, user, db)
+
+@app.post("/ai/question/stream")
+def ai_question_stream(payload: AiQuestionRequest, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    case = _authorized_case(payload.case_id, user, db)
+    status_payload = _ai_status_payload(db)
+    deterministic_payload = AnalysisRequest(analysis_type=payload.analysis_type if payload.analysis_type != "question" else "question", values=payload.values, trials=payload.trials, probability=payload.probability)
+    if payload.analysis_type != "question" or status_payload["active_provider"] == "deterministic":
+        result = _deterministic_analysis(case, deterministic_payload, db)
+        result["question"] = payload.question
+        _record_ai_usage(db, user, "deterministic", "deterministic-engine", "question", "success")
+        return StreamingResponse(_stream_chunks(result), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    provider = str(status_payload["active_provider"])
+    model = str(status_payload["model"])
+    record = _get_ai_settings(db)
+    base_url = settings.ollama_base_url if provider == "ollama" else settings.openai_base_url
+    api_key = settings.ollama_api_key if provider == "ollama" else settings.openai_api_key
+    messages = [{"role": "system", "content": "Answer only from the supplied authorized case context. If evidence is missing, say so. Label uncertainty."}, {"role": "user", "content": payload.question + "\n\nAUTHORIZED CASE CONTEXT:\n" + _case_context(case, db, record.context_limit)}]
+
+    def generate() -> Iterator[str]:
+        chunks: list[str] = []
+        try:
+            for text in _ollama_stream(base_url, model, api_key, messages, settings.ollama_request_timeout_seconds):
+                chunks.append(text)
+                yield f"data: {json.dumps({'type': 'answer_delta', 'text': text})}\n\n"
+            answer = "".join(chunks)
+            _record_ai_usage(db, user, provider, model, "question", "success", 0, len(answer.split()))
+            yield f"data: {json.dumps({'type': 'complete', 'result': {'engine': provider, 'provider_used': provider, 'model': model, 'ai_generated': True, 'question': payload.question, 'answer': answer, 'evidence': [case.id] if case else []}})}\n\n"
+        except Exception as exc:
+            _record_ai_usage(db, user, provider, model, "question", "error", error_message=type(exc).__name__)
+            fallback = _deterministic_analysis(case, deterministic_payload, db)
+            fallback["question"] = payload.question
+            fallback["provider_requested"] = provider
+            fallback["fallback_reason"] = "Ollama was unavailable; deterministic analysis was used instead."
+            yield from _stream_chunks(fallback)
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+@app.post("/analysis/cases/{case_id}")
+def case_analysis(case_id: str, payload: AnalysisRequest, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    case = _authorized_case(case_id, user, db)
+    return _deterministic_analysis(case, payload, db)
+
+@app.get("/admin/ai/settings")
+def admin_ai_settings(user: User = Depends(admin_user), db: DbSession = Depends(db_session)):
+    return _ai_status_payload(db)
+
+@app.patch("/admin/ai/settings")
+def update_admin_ai_settings(payload: AiSettingsUpdate, user: User = Depends(admin_user), db: DbSession = Depends(db_session)):
+    record = _get_ai_settings(db)
+    zero_cost_mode = record.zero_cost_mode if payload.zero_cost_mode is None else payload.zero_cost_mode
+    if payload.active_provider == "openai" and zero_cost_mode:
+        raise HTTPException(status_code=422, detail="Zero Additional Cost Mode blocks paid providers")
+    if payload.openai_enabled and zero_cost_mode:
+        raise HTTPException(status_code=422, detail="Disable Zero Additional Cost Mode before enabling OpenAI")
+    if payload.openai_enabled and (not settings.openai_enabled or not settings.openai_api_key):
+        raise HTTPException(status_code=422, detail="OpenAI is disabled until the server environment explicitly enables it and provides a key")
+    if payload.zero_cost_mode is True:
+        record.openai_enabled = False
+    if payload.zero_cost_mode is not None:
+        record.zero_cost_mode = payload.zero_cost_mode
+    if payload.active_provider is not None:
+        record.active_provider = payload.active_provider
+    if payload.ollama_model is not None:
+        record.ollama_model = payload.ollama_model.strip()
+    if payload.context_limit is not None:
+        record.context_limit = payload.context_limit
+    if payload.openai_enabled is not None:
+        record.openai_enabled = payload.openai_enabled
+    if payload.openai_model is not None:
+        record.openai_model = payload.openai_model.strip()
+    if payload.openai_spending_limit_usd is not None:
+        record.openai_spending_limit_usd = payload.openai_spending_limit_usd
+    record.updated_at = datetime.utcnow()
+    db.commit()
+    return _ai_status_payload(db)
+
+@app.get("/admin/ai/ollama-models")
+def admin_ollama_models(user: User = Depends(admin_user)):
+    return _ollama_models()
+
+@app.get("/admin/ai/usage")
+def admin_ai_usage(user: User = Depends(admin_user), db: DbSession = Depends(db_session)):
+    events = db.scalars(select(AiUsageEvent).order_by(AiUsageEvent.created_at.desc()).limit(100)).all()
+    return {"summary": _usage_summary(db), "events": [{"id": event.id, "provider": event.provider, "model": event.model, "operation": event.operation, "status": event.status, "estimated_cost_usd": event.estimated_cost_usd, "created_at": event.created_at.isoformat(), "error_message": event.error_message} for event in events]}
 
 @app.post("/auth/login")
 def login(payload: LoginRequest, response: Response, db: DbSession = Depends(db_session)):

@@ -46,6 +46,25 @@ def test_relationship_creation_is_case_scoped():
     assert len(client.get(f"/relationships?case_id={case_id}").json()) == 1
     assert client.post("/relationships", json={"source_id": first["id"], "target_id": "E-18472", "relationship_type": "Cross Case", "case_id": case_id}).status_code == 404
 
+def test_zero_cost_ai_status_and_deterministic_question():
+    client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
+    status_response = client.get("/ai/status")
+    assert status_response.status_code == 200
+    status_body = status_response.json()
+    assert status_body["zero_cost_mode"] is True
+    assert status_body["openai"]["available"] is False
+    question = client.post("/ai/question", json={"question": "Summarize this case", "case_id": "CS-4729", "analysis_type": "case_summary"})
+    assert question.status_code == 200
+    assert question.json()["engine"] == "deterministic"
+    assert question.json()["ai_generated"] is False
+    stream = client.post("/ai/question/stream", json={"question": "Stream this case summary", "case_id": "CS-4729", "analysis_type": "case_summary"})
+    assert stream.status_code == 200
+    assert "[DONE]" in stream.text
+    monte_carlo = client.post("/ai/question", json={"question": "Estimate the scenario", "analysis_type": "monte_carlo", "probability": 0.4, "trials": 500})
+    assert monte_carlo.status_code == 200
+    assert monte_carlo.json()["metrics"]["trials"] == 500
+    assert client.get("/admin/ai/settings").status_code == 403
+
 def test_news_sync_is_deduplicated_and_case_attachable(monkeypatch):
     client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
     feed = b"""<?xml version='1.0'?><rss version='2.0'><channel><item><guid>demo-1</guid><title>First synthetic headline</title><link>https://example.com/first</link><description>First summary</description><pubDate>Wed, 04 Nov 2026 12:00:00 GMT</pubDate></item><item><guid>demo-2</guid><title>Second synthetic headline</title><link>https://example.com/second</link><description>Second summary</description></item></channel></rss>"""

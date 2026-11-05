@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 def now_utc() -> datetime:
@@ -92,3 +92,29 @@ class NewsIngestionRun(Base):
     items_created: Mapped[int] = mapped_column(Integer, default=0)
     items_skipped: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
+
+class AiProviderSetting(Base):
+    __tablename__ = "ai_provider_settings"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    zero_cost_mode: Mapped[bool] = mapped_column(Boolean, default=True)
+    active_provider: Mapped[str] = mapped_column(String(32), default="deterministic")
+    ollama_model: Mapped[str] = mapped_column(String(128), default="")
+    context_limit: Mapped[int] = mapped_column(Integer, default=4096)
+    openai_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    openai_model: Mapped[str] = mapped_column(String(128), default="gpt-5-mini")
+    openai_spending_limit_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
+
+class AiUsageEvent(Base):
+    __tablename__ = "ai_usage_events"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(128), default="")
+    operation: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
