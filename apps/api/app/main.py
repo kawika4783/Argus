@@ -178,7 +178,7 @@ def parse_news_feed(payload: bytes, source_url: str) -> list[ParsedNewsItem]:
     return parsed_items
 
 def sync_news_source(db: DbSession, source: NewsSource) -> dict[str, int | str]:
-    run = NewsIngestionRun(id=f"RUN-{new_session_id()}", source_id=source.id, status="running")
+    run = NewsIngestionRun(id=f"RUN-{new_session_id()[:48]}", source_id=source.id, status="running")
     db.add(run)
     db.commit()
     try:
@@ -197,7 +197,7 @@ def sync_news_source(db: DbSession, source: NewsSource) -> dict[str, int | str]:
                 skipped += 1
                 continue
             db.add(NewsItem(
-                id=f"NEWS-{new_session_id()}",
+                id=f"NEWS-{new_session_id()[:48]}",
                 source_id=source.id,
                 external_id=record.external_id,
                 title=record.title,
