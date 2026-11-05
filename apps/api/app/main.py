@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, func, or_, select
+from sqlalchemy import create_engine, func, inspect, or_, select, text
 from sqlalchemy.orm import Session as DbSession, sessionmaker
 from .config import settings
 from .demo import ensure_demo_data
@@ -27,6 +27,12 @@ connect_args = {"check_same_thread": False} if settings.database_url.startswith(
 engine = create_engine(settings.database_url, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base.metadata.create_all(engine)
+with engine.begin() as connection:
+    if "must_change_password" not in {column["name"] for column in inspect(connection).get_columns("users")}:
+        statement = "ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE"
+        if connection.dialect.name == "sqlite":
+            statement = "ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT 0"
+        connection.execute(text(statement))
 with SessionLocal() as db:
     ensure_demo_data(db)
 
@@ -46,6 +52,10 @@ async def stop_news_scheduler() -> None:
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=1, max_length=256)
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
 
 class BootstrapRequest(BaseModel):
     username: str = Field(min_length=3, max_length=120)
@@ -121,6 +131,8 @@ def current_user(request: Request, db: DbSession = Depends(db_session)) -> User:
     user = db.get(User, record.user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User disabled")
+    if user.must_change_password and request.url.path not in {"/auth/me", "/auth/change-password", "/auth/logout"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password change required")
     return user
 
 def admin_user(user: User = Depends(current_user)) -> User:
@@ -623,7 +635,18 @@ def login(payload: LoginRequest, response: Response, db: DbSession = Depends(db_
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     set_session_cookie(response, user, db)
-    return {"user": {"username": user.username, "role": user.role}}
+    return {"user": {"username": user.username, "role": user.role, "must_change_password": user.must_change_password}}
+
+@app.post("/auth/change-password")
+def change_password(payload: PasswordChangeRequest, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(status_code=422, detail="New password must be different")
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    db.commit()
+    return {"ok": True, "must_change_password": False}
 
 @app.get("/admin/bootstrap-status")
 def bootstrap_status(db: DbSession = Depends(db_session)):
@@ -638,7 +661,7 @@ def bootstrap(payload: BootstrapRequest, response: Response, db: DbSession = Dep
         raise HTTPException(status_code=409, detail="Administrator already provisioned")
     if db.scalar(select(User).where((User.username == payload.username) | (User.email == payload.email))):
         raise HTTPException(status_code=409, detail="Username or email already exists")
-    user = User(username=payload.username, email=payload.email, password_hash=hash_password(payload.password), role="super_administrator")
+    user = User(username=payload.username, email=payload.email, password_hash=hash_password(payload.password), role="super_administrator", must_change_password=True)
     db.add(user)
     db.flush()
     set_session_cookie(response, user, db)
@@ -657,7 +680,7 @@ def logout(request: Request, response: Response, db: DbSession = Depends(db_sess
 
 @app.get("/auth/me")
 def me(user: User = Depends(current_user)):
-    return {"username": user.username, "email": user.email, "role": user.role}
+    return {"username": user.username, "email": user.email, "role": user.role, "must_change_password": user.must_change_password}
 
 @app.get("/dashboard")
 def dashboard(user: User = Depends(current_user), db: DbSession = Depends(db_session)):

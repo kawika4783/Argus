@@ -42,6 +42,7 @@ export default function Workspace() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
   const [role, setRole] = useState('analyst');
+  const [mustChangePassword, setMustChangePassword] = useState(false);
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState('');
@@ -54,6 +55,13 @@ export default function Workspace() {
         const meResponse = await fetchWithTimeout(`${API}/auth/me`, { credentials: 'include' });
         if (!meResponse.ok) return;
         const me = await meResponse.json();
+        if (me.must_change_password) {
+          if (cancelled) return;
+          setLoggedIn(true);
+          setRole(me.role || 'analyst');
+          setMustChangePassword(true);
+          return;
+        }
         const workspace = await fetchWorkspace();
         if (cancelled) return;
         setLoggedIn(true);
@@ -74,14 +82,24 @@ export default function Workspace() {
     const response = await fetchWithTimeout(`${API}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ username, password }) });
     if (!response.ok) { setError('Invalid credentials or API unavailable.'); return; }
     const body = await response.json();
+    setRole(body.user?.role || 'analyst');
+    setMustChangePassword(Boolean(body.user?.must_change_password));
+    setLoggedIn(true);
+    if (body.user?.must_change_password) return;
     let workspace: Data;
     try { workspace = await fetchWorkspace(); } catch { setError('Signed in, but workspace data could not be loaded.'); return; }
-    setRole(body.user?.role || 'analyst');
-    setLoggedIn(true);
     setData(workspace);
   }
 
+  async function finishPasswordChange() {
+    try {
+      setData(await fetchWorkspace());
+      setMustChangePassword(false);
+    } catch { setError('Password changed, but workspace data could not be loaded.'); }
+  }
+
   if (loading) return <div className="grid min-h-screen place-items-center bg-ink text-sm text-slate-400">Connecting to Argus…</div>;
+  if (mustChangePassword) return <PasswordChange onChanged={finishPasswordChange} />;
   if (!loggedIn || !data) return <Login onLogin={login} error={error} />;
   const filtered = data.entities.filter((entity) => `${entity.id} ${entity.name} ${entity.type}`.toLowerCase().includes(query.toLowerCase()));
 
@@ -99,6 +117,28 @@ export default function Workspace() {
 }
 
 function Login({ onLogin, error }: { onLogin: (username: string, password: string) => Promise<void>; error: string }) { const [username, setUsername] = useState('analyst'); const [password, setPassword] = useState('change-me-locally'); return <div className="grid min-h-screen place-items-center bg-ink px-4"><div className="w-full max-w-md rounded-2xl border border-line bg-panel/90 p-8 shadow-2xl"><div className="mb-8 flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl border border-cyan/50 text-cyan"><Network size={21}/></div><div><div className="text-xl font-semibold">Argus</div><div className="text-xs text-slate-500">Authorized intelligence workspace</div></div></div><h1 className="text-2xl font-semibold">Sign in</h1><p className="mt-2 text-sm text-slate-400">Access is controlled by the service, not the browser.</p><form className="mt-6 space-y-4" onSubmit={(event) => { event.preventDefault(); void onLogin(username, password); }}><label className="block text-xs text-slate-400">Username<input value={username} onChange={(event) => setUsername(event.target.value)} className="mt-2 h-11 w-full rounded-lg border border-line bg-[#0c141c] px-3 text-sm outline-none focus:border-cyan" /></label><label className="block text-xs text-slate-400">Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} className="mt-2 h-11 w-full rounded-lg border border-line bg-[#0c141c] px-3 text-sm outline-none focus:border-cyan" /></label>{error && <div className="rounded-lg border border-amber/30 bg-amber/10 p-3 text-xs text-amber">{error}</div>}<button className="h-11 w-full rounded-lg bg-cyan font-medium text-ink hover:bg-mint">Enter workspace</button></form><div className="mt-6 flex items-center gap-2 text-[11px] text-slate-500"><ShieldCheck size={14} className="text-mint"/>Synthetic demo data only</div></div></div>; }
+
+function PasswordChange({ onChanged }: { onChanged: () => Promise<void> }) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [notice, setNotice] = useState('');
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setNotice('');
+    if (newPassword.length < 12) { setNotice('Use at least 12 characters.'); return; }
+    if (newPassword !== confirmation) { setNotice('New passwords do not match.'); return; }
+    setSaving(true);
+    try {
+      const response = await fetchWithTimeout(`${API}/auth/change-password`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
+      if (!response.ok) { const body = await response.json().catch(() => ({})); setNotice(body.detail || 'Password change failed.'); return; }
+      await onChanged();
+    } catch { setNotice('The Argus API is unavailable.'); }
+    finally { setSaving(false); }
+  }
+  return <div className="grid min-h-screen place-items-center bg-ink px-4"><div className="w-full max-w-md rounded-2xl border border-line bg-panel/90 p-8 shadow-2xl"><div className="mb-8 flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl border border-cyan/50 text-cyan"><KeyRound size={21}/></div><div><div className="text-xl font-semibold">Set a new password</div><div className="text-xs text-slate-500">Your temporary password must be replaced before continuing.</div></div></div><form className="space-y-4" onSubmit={submit}><label className="block text-xs text-slate-400">Temporary password<input required type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="mt-2 h-11 w-full rounded-lg border border-line bg-[#0c141c] px-3 text-sm outline-none focus:border-cyan" /></label><label className="block text-xs text-slate-400">New password<input required minLength={12} type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="mt-2 h-11 w-full rounded-lg border border-line bg-[#0c141c] px-3 text-sm outline-none focus:border-cyan" /></label><label className="block text-xs text-slate-400">Confirm new password<input required minLength={12} type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} className="mt-2 h-11 w-full rounded-lg border border-line bg-[#0c141c] px-3 text-sm outline-none focus:border-cyan" /></label>{notice && <div className="rounded-lg border border-amber/30 bg-amber/10 p-3 text-xs text-amber">{notice}</div>}<button disabled={saving} className="h-11 w-full rounded-lg bg-cyan font-medium text-ink hover:bg-mint disabled:opacity-50">{saving ? 'Saving…' : 'Change password'}</button></form></div></div>;
+}
 
 function Panel({ title, action, children, className = '' }: { title: string; action?: string; children: ReactNode; className?: string }) { return <section className={`overflow-hidden rounded-xl border border-line bg-panel/90 ${className}`}><div className="flex items-center justify-between border-b border-line px-4 py-3"><h2 className="text-sm font-semibold text-slate-100">{title}</h2>{action && <span className="text-xs text-cyan">{action} →</span>}</div>{children}</section>; }
 function Stat({ icon: Icon, label, value, color }: { icon: typeof Activity; label: string; value: string; color: string }) { return <div className="rounded-xl border border-line bg-panel/90 p-4"><Icon size={20} className={color}/><div className="mt-4 text-xs text-slate-400">{label}</div><div className="mt-1 text-[25px] font-semibold tracking-tight">{value}</div></div>; }
