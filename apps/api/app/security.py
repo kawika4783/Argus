@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from secrets import token_urlsafe
+from hmac import compare_digest
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
@@ -16,6 +17,9 @@ def verify_password(password: str, encoded: str) -> bool:
 
 def new_session_id() -> str:
     return token_urlsafe(48)
+
+def secrets_match(provided: str, expected: str) -> bool:
+    return bool(expected) and compare_digest(provided, expected)
 
 def expires_in(hours: int) -> datetime:
     return (datetime.now(timezone.utc) + timedelta(hours=hours)).replace(tzinfo=None)

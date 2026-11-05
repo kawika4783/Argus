@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./nexusintel.db"
     session_secret: str = "local-only-change-me"
     demo_password: str = "change-me-locally"
+    bootstrap_secret: str = ""
     cors_origins: str = "http://localhost:3000"
     session_hours: int = 8
 
