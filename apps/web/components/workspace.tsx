@@ -11,14 +11,25 @@ type NewsSource = { id: string; name: string; url: string; source_type: string; 
 type NewsItem = { id: string; source_id: string; source_name: string; title: string; url: string; summary: string; author: string; published_at?: string | null; discovered_at: string; case_id?: string | null; review_status: string };
 type Data = { stats: { active_cases: number; entities: number; relationships: number; evidence_ingestion: number; alerts: number }; cases: Case[]; entities: Entity[]; relationships: { id: string; source: string; target: string; type: string; confidence: number }[]; activity: string[]; alerts: string[]; tasks: string[]; newsItems: NewsItem[]; newsSources: NewsSource[] };
 const API = process.env.NEXT_PUBLIC_API_BASE_URL || '/api';
+const REQUEST_TIMEOUT_MS = 10000;
 const nav: { label: View; icon: typeof Activity }[] = [{ label: 'Dashboard', icon: LayoutDashboard }, { label: 'Cases', icon: BriefcaseBusiness }, { label: 'Entities', icon: Users }, { label: 'Graph', icon: Network }, { label: 'Timeline', icon: Activity }, { label: 'Map', icon: Map }, { label: 'Evidence', icon: Database }, { label: 'News', icon: Rss }, { label: 'Search', icon: Search }, { label: 'Admin', icon: Settings }];
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function fetchWorkspace(): Promise<Data> {
-  const dashboardResponse = await fetch(`${API}/dashboard`, { credentials: 'include' });
+  const dashboardResponse = await fetchWithTimeout(`${API}/dashboard`, { credentials: 'include' });
   if (!dashboardResponse.ok) throw new Error('Dashboard data could not be loaded.');
   const [newsItemsResponse, newsSourcesResponse] = await Promise.all([
-    fetch(`${API}/news/items`, { credentials: 'include' }),
-    fetch(`${API}/news/sources`, { credentials: 'include' }),
+    fetchWithTimeout(`${API}/news/items`, { credentials: 'include' }),
+    fetchWithTimeout(`${API}/news/sources`, { credentials: 'include' }),
   ]);
   const dashboard = await dashboardResponse.json();
   return { ...dashboard, newsItems: newsItemsResponse.ok ? await newsItemsResponse.json() : [], newsSources: newsSourcesResponse.ok ? await newsSourcesResponse.json() : [] };
@@ -38,7 +49,7 @@ export default function Workspace() {
     let cancelled = false;
     async function load() {
       try {
-        const meResponse = await fetch(`${API}/auth/me`, { credentials: 'include' });
+        const meResponse = await fetchWithTimeout(`${API}/auth/me`, { credentials: 'include' });
         if (!meResponse.ok) return;
         const me = await meResponse.json();
         const workspace = await fetchWorkspace();
@@ -58,7 +69,7 @@ export default function Workspace() {
 
   async function login(username: string, password: string) {
     setError('');
-    const response = await fetch(`${API}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ username, password }) });
+    const response = await fetchWithTimeout(`${API}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ username, password }) });
     if (!response.ok) { setError('Invalid credentials or API unavailable.'); return; }
     const body = await response.json();
     let workspace: Data;
@@ -105,7 +116,7 @@ function SecondaryView({ view, entities, cases, newsItems, newsSources, setView,
     event.preventDefault();
     const isEntity = view === 'Entities';
     const payload = isEntity ? { name, entity_type: entityType, description, confidence: Number(confidence), case_id: caseId } : { title: name, description, priority: 'medium' };
-    const response = await fetch(`${API}/${isEntity ? 'entities' : 'cases'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(payload) });
+    const response = await fetchWithTimeout(`${API}/${isEntity ? 'entities' : 'cases'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(payload) });
     if (!response.ok) { setNotice('Could not save. Check your authorization and fields.'); return; }
     setOpen(false);
     setName('');
