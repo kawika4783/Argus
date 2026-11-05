@@ -60,6 +60,13 @@ class EntityCreate(BaseModel):
     confidence: int = Field(default=50, ge=0, le=100)
     case_id: str = Field(min_length=1, max_length=32)
 
+class RelationshipCreate(BaseModel):
+    source_id: str = Field(min_length=1, max_length=32)
+    target_id: str = Field(min_length=1, max_length=32)
+    relationship_type: str = Field(min_length=2, max_length=64)
+    confidence: int = Field(default=50, ge=0, le=100)
+    case_id: str = Field(min_length=1, max_length=32)
+
 class NewsSourceCreate(BaseModel):
     name: str = Field(min_length=3, max_length=255)
     url: str = Field(min_length=10, max_length=2048)
@@ -342,6 +349,34 @@ def create_entity(payload: EntityCreate, user: User = Depends(current_user), db:
     db.add(entity)
     db.commit()
     return {"id": entity.id, "name": entity.name, "type": entity.entity_type, "confidence": entity.confidence, "case_id": entity.case_id}
+
+@app.get("/relationships")
+def list_relationships(case_id: str | None = None, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    is_admin = user.role in {"administrator", "super_administrator"}
+    if case_id and not is_admin and not db.scalar(select(Case).where(Case.id == case_id, Case.owner_user_id == user.id)):
+        raise HTTPException(status_code=404, detail="Authorized case not found")
+    statement = select(Relationship)
+    if not is_admin:
+        owned_case_ids = select(Case.id).where(Case.owner_user_id == user.id)
+        statement = statement.where(Relationship.case_id.in_(owned_case_ids))
+    if case_id:
+        statement = statement.where(Relationship.case_id == case_id)
+    return [{"id": relationship.id, "source_id": relationship.source_id, "target_id": relationship.target_id, "type": relationship.relationship_type, "confidence": relationship.confidence, "case_id": relationship.case_id} for relationship in db.scalars(statement.order_by(Relationship.id)).all()]
+
+@app.post("/relationships")
+def create_relationship(payload: RelationshipCreate, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    if payload.source_id == payload.target_id:
+        raise HTTPException(status_code=422, detail="A relationship must connect two different entities")
+    case = db.scalar(select(Case).where(Case.id == payload.case_id, Case.owner_user_id == user.id))
+    if not case:
+        raise HTTPException(status_code=404, detail="Authorized case not found")
+    entities = db.scalars(select(Entity).where(Entity.id.in_([payload.source_id, payload.target_id]), Entity.case_id == case.id)).all()
+    if len(entities) != 2:
+        raise HTTPException(status_code=404, detail="Both entities must belong to the authorized case")
+    relationship = Relationship(id=f"R-{new_session_id()[:8].upper()}", source_id=payload.source_id, target_id=payload.target_id, relationship_type=payload.relationship_type.strip(), confidence=payload.confidence, case_id=case.id)
+    db.add(relationship)
+    db.commit()
+    return {"id": relationship.id, "source_id": relationship.source_id, "target_id": relationship.target_id, "type": relationship.relationship_type, "confidence": relationship.confidence, "case_id": relationship.case_id}
 
 @app.get("/admin/access-check")
 def access_check(user: User = Depends(admin_user)):

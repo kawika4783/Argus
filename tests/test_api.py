@@ -34,6 +34,18 @@ def test_entity_creation_cannot_cross_case_boundary():
     response = client.post("/entities", json={"name": "Restricted", "entity_type": "Person", "case_id": "CS-NOT-AUTHORIZED"})
     assert response.status_code == 404
 
+def test_relationship_creation_is_case_scoped():
+    client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
+    created_case = client.post("/cases", json={"title": "Relationship test", "description": "Synthetic relationship case.", "priority": "medium"}).json()
+    case_id = created_case["id"]
+    first = client.post("/entities", json={"name": "Source entity", "entity_type": "Person", "case_id": case_id}).json()
+    second = client.post("/entities", json={"name": "Target entity", "entity_type": "Organization", "case_id": case_id}).json()
+    created = client.post("/relationships", json={"source_id": first["id"], "target_id": second["id"], "relationship_type": "Associated With", "confidence": 82, "case_id": case_id})
+    assert created.status_code == 200
+    assert created.json()["case_id"] == case_id
+    assert len(client.get(f"/relationships?case_id={case_id}").json()) == 1
+    assert client.post("/relationships", json={"source_id": first["id"], "target_id": "E-18472", "relationship_type": "Cross Case", "case_id": case_id}).status_code == 404
+
 def test_news_sync_is_deduplicated_and_case_attachable(monkeypatch):
     client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
     feed = b"""<?xml version='1.0'?><rss version='2.0'><channel><item><guid>demo-1</guid><title>First synthetic headline</title><link>https://example.com/first</link><description>First summary</description><pubDate>Wed, 04 Nov 2026 12:00:00 GMT</pubDate></item><item><guid>demo-2</guid><title>Second synthetic headline</title><link>https://example.com/second</link><description>Second summary</description></item></channel></rss>"""
