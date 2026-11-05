@@ -295,6 +295,18 @@ def _get_ai_settings(db: DbSession) -> AiProviderSetting:
     db.commit()
     return record
 
+def _ollama_error_message(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in {401, 403}:
+            return f"Ollama authentication required (HTTP {status}); configure NEXUSINTEL_OLLAMA_API_KEY on the server"
+        return f"Ollama returned HTTP {status}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "Ollama request timed out"
+    if isinstance(exc, httpx.ConnectError):
+        return "Ollama connection failed"
+    return f"Ollama unavailable: {type(exc).__name__}"
+
 def _ollama_models() -> dict[str, object]:
     endpoint = settings.ollama_base_url.rstrip("/") + "/api/tags"
     try:
@@ -305,7 +317,7 @@ def _ollama_models() -> dict[str, object]:
         models = [item.get("name", "") for item in response.json().get("models", []) if item.get("name")]
         return {"available": True, "models": models, "error": None}
     except Exception as exc:
-        return {"available": False, "models": [], "error": f"Ollama unavailable: {type(exc).__name__}"}
+        return {"available": False, "models": [], "error": _ollama_error_message(exc)}
 
 def _usage_summary(db: DbSession) -> dict[str, object]:
     month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
