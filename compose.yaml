@@ -21,6 +21,7 @@ services:
       NEXUSINTEL_DATABASE_URL: postgresql+psycopg://nexusintel:nexusintel@db:5432/nexusintel
       NEXUSINTEL_SESSION_SECRET: ${NEXUSINTEL_SESSION_SECRET:-local-only-change-me}
       NEXUSINTEL_DEMO_PASSWORD: ${NEXUSINTEL_DEMO_PASSWORD:-change-me-locally}
+      NEXUSINTEL_BOOTSTRAP_SECRET: ${NEXUSINTEL_BOOTSTRAP_SECRET:-}
       NEXUSINTEL_CORS_ORIGINS: http://localhost:3000
     depends_on:
       db:
