@@ -27,14 +27,18 @@ def ensure_demo_data(db: DbSession) -> None:
             Relationship(id="R-1003", source_id="E-18472", target_id="E-18475", relationship_type="Owns", confidence=65, case_id=case.id),
             Relationship(id="R-1004", source_id="E-18476", target_id="E-18473", relationship_type="Connected To", confidence=73, case_id=case.id),
         ])
-    if not db.scalar(select(NewsSource).where(NewsSource.id == "SRC-GDELT")):
+    source = db.scalar(select(NewsSource).where(NewsSource.id == "SRC-GDELT"))
+    if not source:
         db.add(NewsSource(
             id="SRC-GDELT",
             name="GDELT Global News",
-            url="https://api.gdeltproject.org/api/v2/doc/doc?query=conflict%20OR%20security&mode=artlist&maxrecords=25&format=rss&sort=datedesc",
+            url="https://data.gdeltproject.org/gdeltv3/gal/feed.rss",
             source_type="rss",
             description="Free public global news and event feed for synthetic demonstration and analyst review.",
             enabled=True,
             public_access=True,
         ))
+    elif source.url.startswith("https://api.gdeltproject.org/api/v2/doc/doc"):
+        source.url = "https://data.gdeltproject.org/gdeltv3/gal/feed.rss"
+        source.description = "Free public global news and event feed for synthetic demonstration and analyst review."
     db.commit()
