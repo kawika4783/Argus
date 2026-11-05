@@ -32,3 +32,27 @@ def test_entity_creation_cannot_cross_case_boundary():
     client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
     response = client.post("/entities", json={"name": "Restricted", "entity_type": "Person", "case_id": "CS-NOT-AUTHORIZED"})
     assert response.status_code == 404
+
+def test_news_sync_is_deduplicated_and_case_attachable(monkeypatch):
+    client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
+    feed = b"""<?xml version='1.0'?><rss version='2.0'><channel><item><guid>demo-1</guid><title>First synthetic headline</title><link>https://example.com/first</link><description>First summary</description><pubDate>Wed, 04 Nov 2026 12:00:00 GMT</pubDate></item><item><guid>demo-2</guid><title>Second synthetic headline</title><link>https://example.com/second</link><description>Second summary</description></item></channel></rss>"""
+
+    class FakeResponse:
+        content = feed
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("apps.api.app.main.httpx.Client.get", lambda self, url: FakeResponse())
+    first_sync = client.post("/news/sources/SRC-GDELT/sync")
+    assert first_sync.status_code == 200
+    assert first_sync.json()["items_seen"] == 2
+    second_sync = client.post("/news/sources/SRC-GDELT/sync")
+    assert second_sync.status_code == 200
+    assert second_sync.json()["items_created"] == 0
+    assert second_sync.json()["items_skipped"] == 2
+    items = client.get("/news/items").json()
+    demo_item = next(item for item in items if item["external_id"] == "demo-1")
+    attached = client.post(f"/news/items/{demo_item['id']}/attach", json={"case_id": "CS-4729"})
+    assert attached.status_code == 200
+    assert attached.json()["review_status"] == "attached"

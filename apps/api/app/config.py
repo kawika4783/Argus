@@ -9,5 +9,9 @@ class Settings(BaseSettings):
     bootstrap_secret: str = ""
     cors_origins: str = "http://localhost:3000"
     session_hours: int = 8
+    news_poll_interval_seconds: int = 900
+    news_request_timeout_seconds: int = 20
+    news_max_items_per_sync: int = 50
+    news_max_feed_bytes: int = 2_000_000
 
 settings = Settings()
