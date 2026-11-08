@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     news_request_timeout_seconds: int = 20
     news_max_items_per_sync: int = 50
     news_max_feed_bytes: int = 2_000_000
+    evidence_dir: str = "./data/evidence"
+    evidence_max_bytes: int = 25_000_000
     zero_cost_mode: bool = True
     ollama_base_url: str = "http://ollama:11434"
     ollama_api_key: str = ""

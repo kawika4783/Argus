@@ -46,6 +46,27 @@ def test_relationship_creation_is_case_scoped():
     assert len(client.get(f"/relationships?case_id={case_id}").json()) == 1
     assert client.post("/relationships", json={"source_id": first["id"], "target_id": "E-18472", "relationship_type": "Cross Case", "case_id": case_id}).status_code == 404
 
+def test_evidence_upload_hash_and_authorized_download(tmp_path, monkeypatch):
+    monkeypatch.setattr("apps.api.app.main.settings.evidence_dir", str(tmp_path))
+    client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
+    payload = b"Synthetic evidence record\nNo real personal data.\n"
+    uploaded = client.post("/evidence", data={"case_id": "CS-4729", "source_reference": "Synthetic source 1", "notes": "Analyst upload"}, files={"upload": ("brief.txt", payload, "text/plain")})
+    assert uploaded.status_code == 200
+    body = uploaded.json()
+    assert body["size_bytes"] == len(payload)
+    assert body["sha256"] == __import__("hashlib").sha256(payload).hexdigest()
+    downloaded = client.get(f"/evidence/{body['id']}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.content == payload
+
+def test_evidence_upload_rejects_unsupported_and_cross_case_access(tmp_path, monkeypatch):
+    monkeypatch.setattr("apps.api.app.main.settings.evidence_dir", str(tmp_path))
+    client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
+    unsupported = client.post("/evidence", data={"case_id": "CS-4729"}, files={"upload": ("payload.exe", b"MZ", "application/octet-stream")})
+    assert unsupported.status_code == 415
+    restricted = client.post("/evidence", data={"case_id": "CS-NOT-AUTHORIZED"}, files={"upload": ("brief.txt", b"private", "text/plain")})
+    assert restricted.status_code == 404
+
 def test_zero_cost_ai_status_and_deterministic_question():
     client.post("/auth/login", json={"username": "analyst", "password": "demo-pass"})
     status_response = client.get("/ai/status")

@@ -53,6 +53,20 @@ class Relationship(Base):
     confidence: Mapped[int] = mapped_column(Integer, default=50)
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"))
 
+class Evidence(Base):
+    __tablename__ = "evidence"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    storage_key: Mapped[str] = mapped_column(String(255), unique=True)
+    content_type: Mapped[str] = mapped_column(String(128))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    source_reference: Mapped[str] = mapped_column(String(1000), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    uploaded_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
+
 class NewsSource(Base):
     __tablename__ = "news_sources"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

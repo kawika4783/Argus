@@ -29,6 +29,8 @@ services:
       NEXUSINTEL_OLLAMA_REQUEST_TIMEOUT_SECONDS: ${NEXUSINTEL_OLLAMA_REQUEST_TIMEOUT_SECONDS:-60}
       NEXUSINTEL_OLLAMA_DEFAULT_MODEL: ${NEXUSINTEL_OLLAMA_DEFAULT_MODEL:-qwen3:1.7b}
       NEXUSINTEL_OLLAMA_CONTEXT_LIMIT: ${NEXUSINTEL_OLLAMA_CONTEXT_LIMIT:-4096}
+      NEXUSINTEL_EVIDENCE_DIR: ${NEXUSINTEL_EVIDENCE_DIR:-/data/evidence}
+      NEXUSINTEL_EVIDENCE_MAX_BYTES: ${NEXUSINTEL_EVIDENCE_MAX_BYTES:-25000000}
       NEXUSINTEL_OPENAI_ENABLED: ${NEXUSINTEL_OPENAI_ENABLED:-false}
       NEXUSINTEL_OPENAI_API_KEY: ${NEXUSINTEL_OPENAI_API_KEY:-}
       NEXUSINTEL_OPENAI_BASE_URL: ${NEXUSINTEL_OPENAI_BASE_URL:-https://api.openai.com/v1}
@@ -39,6 +41,8 @@ services:
       db:
         condition: service_healthy
     networks: [private]
+    volumes:
+      - nexusintel_evidence:/data/evidence
   web:
     build:
       context: .
@@ -65,6 +69,7 @@ services:
     networks: [private]
 volumes:
   nexusintel_pg:
+  nexusintel_evidence:
 networks:
   private:
     driver: bridge

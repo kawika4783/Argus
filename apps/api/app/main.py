@@ -7,20 +7,21 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, func, inspect, or_, select, text
 from sqlalchemy.orm import Session as DbSession, sessionmaker
 from .config import settings
 from .demo import ensure_demo_data
-from .models import AiProviderSetting, AiUsageEvent, Base, Case, Entity, NewsIngestionRun, NewsItem, NewsSource, Relationship, Session, User
+from .models import AiProviderSetting, AiUsageEvent, Base, Case, Entity, Evidence, NewsIngestionRun, NewsItem, NewsSource, Relationship, Session, User
 from .security import expires_in, hash_password, new_session_id, secrets_match, verify_password
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
@@ -35,6 +36,52 @@ with engine.begin() as connection:
         connection.execute(text(statement))
 with SessionLocal() as db:
     ensure_demo_data(db)
+
+EVIDENCE_TYPES = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+}
+
+def evidence_root() -> Path:
+    root = Path(settings.evidence_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+def evidence_payload(record: Evidence) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "case_id": record.case_id,
+        "original_filename": record.original_filename,
+        "content_type": record.content_type,
+        "size_bytes": record.size_bytes,
+        "sha256": record.sha256,
+        "source_reference": record.source_reference,
+        "notes": record.notes,
+        "uploaded_by_user_id": record.uploaded_by_user_id,
+        "created_at": record.created_at.isoformat(),
+        "download_url": f"/evidence/{record.id}/download",
+    }
+
+def _verify_evidence_signature(suffix: str, first_bytes: bytes) -> bool:
+    if suffix == ".pdf":
+        return first_bytes.startswith(b"%PDF-")
+    if suffix == ".png":
+        return first_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return first_bytes.startswith(b"\xff\xd8\xff")
+    return True
+
+def _authorized_evidence(record: Evidence, user: User, db: DbSession) -> bool:
+    if user.role in {"administrator", "super_administrator"}:
+        return True
+    return db.scalar(select(Case).where(Case.id == record.case_id, Case.owner_user_id == user.id)) is not None
 
 app = FastAPI(title="Argus API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type"])
@@ -778,6 +825,102 @@ def create_relationship(payload: RelationshipCreate, user: User = Depends(curren
     db.add(relationship)
     db.commit()
     return {"id": relationship.id, "source_id": relationship.source_id, "target_id": relationship.target_id, "type": relationship.relationship_type, "confidence": relationship.confidence, "case_id": relationship.case_id}
+
+@app.get("/evidence")
+def list_evidence(case_id: str | None = None, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    is_admin = user.role in {"administrator", "super_administrator"}
+    statement = select(Evidence)
+    if not is_admin:
+        owned_case_ids = select(Case.id).where(Case.owner_user_id == user.id)
+        statement = statement.where(Evidence.case_id.in_(owned_case_ids))
+    if case_id:
+        if not is_admin and not db.scalar(select(Case).where(Case.id == case_id, Case.owner_user_id == user.id)):
+            raise HTTPException(status_code=404, detail="Authorized case not found")
+        statement = statement.where(Evidence.case_id == case_id)
+    records = db.scalars(statement.order_by(Evidence.created_at.desc())).all()
+    return [evidence_payload(record) for record in records]
+
+@app.post("/evidence")
+def upload_evidence(
+    case_id: str = Form(..., min_length=1, max_length=32),
+    source_reference: str = Form(default="", max_length=1000),
+    notes: str = Form(default="", max_length=5000),
+    upload: UploadFile = File(...),
+    user: User = Depends(current_user),
+    db: DbSession = Depends(db_session),
+):
+    case_statement = select(Case).where(Case.id == case_id)
+    if user.role not in {"administrator", "super_administrator"}:
+        case_statement = case_statement.where(Case.owner_user_id == user.id)
+    case = db.scalar(case_statement)
+    if not case:
+        raise HTTPException(status_code=404, detail="Authorized case not found")
+    original_filename = Path(upload.filename or "").name.strip()
+    suffix = Path(original_filename).suffix.lower()
+    if not original_filename or original_filename in {".", ".."} or suffix not in EVIDENCE_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported evidence type")
+    expected_type = EVIDENCE_TYPES[suffix]
+    if upload.content_type and upload.content_type not in {expected_type, "application/octet-stream"}:
+        raise HTTPException(status_code=415, detail="Uploaded content type does not match the file extension")
+
+    evidence_id = f"EV-{new_session_id()[:16].upper()}"
+    root = evidence_root()
+    case_folder = "".join(character for character in case.id if character.isalnum() or character in "-_" )[:64] or "case"
+    directory = (root / case_folder).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    final_path = (directory / f"{evidence_id}{suffix}").resolve()
+    if not final_path.is_relative_to(root):
+        raise HTTPException(status_code=500, detail="Evidence storage path could not be validated")
+    partial_path = final_path.with_suffix(final_path.suffix + ".part")
+    digest = hashlib.sha256()
+    total = 0
+    first_bytes = b""
+    try:
+        with partial_path.open("wb") as destination:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not first_bytes:
+                    first_bytes = chunk[:64]
+                total += len(chunk)
+                if total > settings.evidence_max_bytes:
+                    raise HTTPException(status_code=413, detail="Evidence file exceeds the configured size limit")
+                digest.update(chunk)
+                destination.write(chunk)
+        if not _verify_evidence_signature(suffix, first_bytes):
+            raise HTTPException(status_code=415, detail="Evidence file signature does not match its extension")
+        partial_path.replace(final_path)
+        record = Evidence(id=evidence_id, case_id=case.id, original_filename=original_filename[:255], storage_key=str(final_path.relative_to(root)), content_type=expected_type, size_bytes=total, sha256=digest.hexdigest(), source_reference=source_reference.strip(), notes=notes.strip(), uploaded_by_user_id=user.id)
+        db.add(record)
+        db.commit()
+        return evidence_payload(record)
+    except HTTPException:
+        if partial_path.exists():
+            partial_path.unlink()
+        if final_path.exists():
+            final_path.unlink()
+        raise
+    except Exception as exc:
+        db.rollback()
+        if partial_path.exists():
+            partial_path.unlink()
+        if final_path.exists():
+            final_path.unlink()
+        raise HTTPException(status_code=500, detail="Evidence could not be stored") from exc
+    finally:
+        upload.file.close()
+
+@app.get("/evidence/{evidence_id}/download")
+def download_evidence(evidence_id: str, user: User = Depends(current_user), db: DbSession = Depends(db_session)):
+    record = db.get(Evidence, evidence_id)
+    if not record or not _authorized_evidence(record, user, db):
+        raise HTTPException(status_code=404, detail="Authorized evidence not found")
+    root = evidence_root()
+    path = (root / record.storage_key).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Evidence object is unavailable")
+    return FileResponse(path, media_type=record.content_type, filename=record.original_filename, content_disposition_type="attachment")
 
 @app.get("/admin/access-check")
 def access_check(user: User = Depends(admin_user)):
